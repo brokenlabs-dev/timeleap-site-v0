@@ -41,6 +41,29 @@ export async function buildPageTree(rootId: string): Promise<PageTree> {
   const bySlug = new Map<string, PageTreeNode>()
   const slugMap = new Map<string, string>()
   const usedSlugs = new Set<string>()
+  const visited = new Set<string>()
+
+  // Collect descendant child-page ids, descending through container blocks
+  // (callout, toggle, columns, …) but NOT into the pages themselves. Notion
+  // nests sub-pages inside layout blocks, so a flat scan of direct children
+  // misses them.
+  function collectChildPageIds(content: string[], allBlocks: RecordMap): string[] {
+    const found: string[] = []
+    const stack = [...content]
+    while (stack.length) {
+      const id = stack.shift()!
+      const uuid = notionIdToUuid(id)
+      const b = allBlocks.block?.[uuid]?.value ?? allBlocks.block?.[id]?.value
+      if (!b) continue
+      if (b.type === 'page' || b.type === 'child_page') {
+        found.push(id)
+        // stop here — the sub-page's own content is handled when it's processed
+      } else if (b.content?.length) {
+        stack.push(...b.content)
+      }
+    }
+    return found
+  }
 
   async function processPage(
     pageId: string,
@@ -48,6 +71,9 @@ export async function buildPageTree(rootId: string): Promise<PageTree> {
     allBlocks: RecordMap
   ): Promise<PageTreeNode | null> {
     const uuid = notionIdToUuid(pageId)
+    if (visited.has(uuid)) return null
+    visited.add(uuid)
+
     const blockEntry = allBlocks.block?.[uuid] ?? allBlocks.block?.[pageId]
     if (!blockEntry?.value) return null
 
@@ -71,25 +97,20 @@ export async function buildPageTree(rootId: string): Promise<PageTree> {
     slugMap.set(pageId, slug)
 
     if (block.content?.length) {
-      for (const childId of block.content) {
+      const childPageIds = collectChildPageIds(block.content, allBlocks)
+      for (const childId of childPageIds) {
         const childUuid = notionIdToUuid(childId)
-        const childBlock =
-          allBlocks.block?.[childUuid]?.value ?? allBlocks.block?.[childId]?.value
-        if (!childBlock) continue
-
-        if (childBlock.type === 'child_page' || childBlock.type === 'page') {
-          // Fetch child page content if not already loaded
-          if (!allBlocks.block?.[childUuid]?.value?.content) {
-            try {
-              const childRm = await loadPageChunk(childUuid)
-              allBlocks = mergeRecordMaps(allBlocks, childRm)
-            } catch {
-              // skip unreachable pages
-            }
-          }
-          const childNode = await processPage(childId, depth + 1, allBlocks)
-          if (childNode) node.children.push(childNode)
+        // A sub-page block carries a `content` array (its child ids) but those
+        // child blocks aren't in this record map — fetch the page's own chunk
+        // so we can read its title and discover *its* nested sub-pages.
+        try {
+          const childRm = await loadPageChunk(childUuid)
+          allBlocks = mergeRecordMaps(allBlocks, childRm)
+        } catch {
+          // skip unreachable pages
         }
+        const childNode = await processPage(childId, depth + 1, allBlocks)
+        if (childNode) node.children.push(childNode)
       }
     }
     return node

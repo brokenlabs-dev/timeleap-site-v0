@@ -37,9 +37,10 @@ export default function BlockRenderer({ blockId, allBlocks, slugMap, depth = 0 }
 
   switch (block.type) {
     case 'page':
-      // Only render root page children (not sub-pages inline)
+      // Root page: render its content inline. Nested sub-page: render a link
+      // card (Notion gives sub-pages type 'page', not always 'child_page').
       if (depth === 0) return <>{renderChildren()}</>
-      return null
+      return <ChildPage block={block} slugMap={slugMap} />
 
     case 'header':
     case 'sub_header':
